@@ -1,0 +1,104 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: demo-app-rollout
+spec:
+  replicas: 5
+  strategy:
+    canary:
+      canaryService: demo-app-preview-service
+      stableService: demo-app-service
+      trafficRouting:
+        nginx:
+          stableIngress: demo-app-ingress
+          annotationPrefix: nginx.ingress.kubernetes.io
+          additionalIngressAnnotations:
+            canary-by-header: X-Canary
+      steps:
+      - setWeight: 5
+      - pause: 
+          duration: 10s
+      - pause: {}  # Manual approval required
+      - setWeight: 25
+      - pause: 
+          duration: 10s  
+      - pause: {}  # Manual approval required
+      - setWeight: 50
+      - pause: 
+          duration: 10s
+      - pause: {}  # Manual approval required
+      - setWeight: 100
+      - pause: 
+          duration: 5s
+      analysis:
+        templates:
+        - templateName: error-rate-analysis
+        startingStep: 1
+        args:
+        - name: service-name
+          value: demo-app-service
+      scaleDownDelaySeconds: 30
+      abortScaleDownDelaySeconds: 30
+  selector:
+    matchLabels:
+      app: demo-app
+  template:
+    metadata:
+      labels:
+        app: demo-app
+    spec:
+      containers:
+      - name: demo-app
+        image: demo-app:v1
+        ports:
+        - containerPort: 8000
+        env:
+        - name: APP_VERSION
+          valueFrom:
+            configMapKeyRef:
+              name: demo-app-config
+              key: APP_VERSION
+        - name: FAILURE_RATE
+          valueFrom:
+            configMapKeyRef:
+              name: demo-app-config
+              key: FAILURE_RATE
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "250m"
+          limits:
+            memory: "128Mi"
+            cpu: "500m"
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: error-rate-analysis
+spec:
+  args:
+  - name: service-name
+  metrics:
+  - name: error-rate
+    interval: 30s
+    count: 3
+    successCondition: result < 0.10
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: http://prometheus-service.monitoring.svc.cluster.local:9090
+        query: |
+          sum(rate(http_requests_total{service="{{args.service-name}}",status=~"5.."}[5m])) /
+          sum(rate(http_requests_total{service="{{args.service-name}}"}[5m]))
